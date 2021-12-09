@@ -1,0 +1,440 @@
+---
+title: "Preliminary occurance check and Maxent model for for V. velutina & V. mandarina"
+author: "Daniel Flø"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+---
+
+<br>
+
+# Conclusion: there is enough data to predict species potential distributions.
+
+<br>
+
+
+```{r setup, include=FALSE}
+
+require(knitr)
+knitr::opts_knit$set(root.dir = 'C:/Users/DAFL/Dropbox/vkm/Vespa velutina/Vespa velutina/')
+
+library(spocc)
+library(rgbif)
+library(tidyverse)
+library(taxize)
+library(dplyr)
+library(scrubr)
+library(foreach)
+library(doParallel)
+library(raster)
+library(dismo)
+
+```
+
+<br>
+
+######  1 gnr_resolve Resolve names using Global Names Resolver
+######  2 get_gbifid_ include synonymes 
+######  3 gbif
+######  4 occ multiple databases 
+######  5 plot 
+
+<br>
+
+```{r}
+
+splist  <- c("Vespa velutina",  "Vespa mandarina")
+
+```
+
+<br>
+
+```{r pressure, echo=FALSE, warning = FALSE}
+
+# Resolve names using Global Names Resolv
+species<-taxize::gnr_resolve(splist, best_match_only=T)
+
+# make new vektor of species to check gbif backbone occurance 
+splist<-species$matched_name
+
+# fill in your gbif.org credentials 
+user <- "danief"  
+pwd <- "ZXasqw12" 
+email <- "floedaniel@gmail.com" 
+
+splist<- splist %>% 
+  taxize::get_gbifid_(method="backbone") %>% # match names to the GBIF backbone to get taxonkeys
+  purrr::imap(~ .x %>% mutate(original_sciname = .y)) %>% # add original name back into data.frame
+  bind_rows() 
+
+```
+
+<br>
+
+```{r splist}
+
+splist
+
+```
+
+<br>
+
+```{r spocc, echo=FALSE, warning = FALSE}
+
+
+library(spocc)
+## Loading required package: ggplot2
+out <- occ(query = splist$scientificname, from =c("gbif", "bison", "obis", "ala", "inat", "idigbio"), limit = 9000)
+
+df_out <- occ2df(out)
+
+as_tibble(df_out)
+
+unique(df_out$prov)
+
+df_out <- dplyr::select(df_out, name, longitude, latitude)
+
+names(df_out)<-c("Species","Longitude", "Latitude")
+
+df_out$Longitude <- as.numeric(df_out$Longitude)
+df_out$Latitude <- as.numeric(df_out$Latitude)
+
+```
+
+<br>
+
+```{r bind, echo=FALSE}
+
+df <- df_out
+
+```
+
+<br>
+
+```{r basemap, echo=FALSE}
+
+wrld <- map_data("world") %>% filter(!region=="Antarctica")
+
+```
+
+<br>
+
+##  Plot all data
+
+<br>
+
+```{r plot_one, fig.dim = c(10, 10), warning = FALSE}
+
+ggplot() +
+  geom_map(data=wrld, map=wrld, aes(map_id=region , x=long, y=lat), fill="black", col="white") +
+  geom_point(data=df, aes(x=Longitude, y=Latitude, col=Species)) +
+  coord_quickmap() +
+  theme_void()
+
+```
+
+<br>
+<br>
+
+
+```{r clean, echo=FALSE, warning = FALSE}
+
+df <-df_out %>%
+  coord_impossible() %>%
+  coord_incomplete() %>% 
+  coord_unlikely()
+
+df <- df %>% coord_unlikely() 
+
+df$Species <- tolower(df$Species)
+df <- dplyr::filter(df, !grepl("BOLD", Species))
+df$Species <- word(df$Species, start=1, end=2)
+
+```
+
+<br>
+
+##  Plot clean data (i.e no dups or impossible)
+
+<br>
+
+```{r plot_clean, fig.dim = c(10, 10), warning = FALSE}
+
+ggplot() +
+  geom_map(data=wrld, map=wrld, aes(map_id=region , x=long, y=lat), fill="black", col="white") +
+  geom_point(data=df, aes(x=Longitude, y=Latitude, col=Species)) +
+  coord_quickmap() +
+  theme_void() 
+
+```
+
+<br>
+
+##  Check how many in Asia
+
+<br>
+
+```{r in_asia}
+
+df %>%  filter(Longitude > 60) %>% count()
+
+```
+
+<br>
+
+##  Plot only occurence in Asia 
+
+<br>
+
+```{r plot_asia, fig.dim = c(10, 10), warning = FALSE}
+
+ggplot() +
+  geom_map(data=wrld, map=wrld, aes(map_id=region , x=long, y=lat), fill="black", col="white") +
+  geom_point(data=filter(df, Longitude > 60), aes(x=Longitude, y=Latitude, col=Species)) +
+  coord_quickmap() +
+  theme_void() 
+
+
+```
+
+<br>
+
+##  Download predictors
+
+<br>
+
+```{r predictors,  warning = FALSE}
+
+# Bring in the env layers from the dismo package
+# predictors <- raster::getData("worldclim", var="bio", res=10)
+
+library(rnaturalearth)
+library(rnaturalearthdata)
+
+eurasia <- ne_countries(continent = c('europe', "asia"), scale = "medium", returnclass = "sp" )
+extent(bbox(eurasia))
+extent <- c(-25, 180, -21.36904, 81.8542)
+
+library(raster)
+
+dir.create("C:/Users/DAFL/Dropbox/vkm/Vespa velutina/Vespa velutina/Study Region/", recursive=TRUE, showWarnings=FALSE)
+
+library(doParallel)  #Foreach Parallel Adaptor 
+library(foreach)     #Provides foreach looping construct
+
+# Define how many cores you want to use
+UseCores <- detectCores() -1
+# Register CoreCluster
+cl       <- makeCluster(UseCores)
+registerDoParallel(cl)
+
+stack_list <- list.files(path = "C:/Users/DAFL/Desktop/worldclim", full.names = TRUE, pattern = "\\.tif$")
+
+# for each BIOCLIM raster
+#Use foreach loop and %dopar% command
+foreach(i=1:length(stack_list), .packages = c("raster")) %dopar% {
+  
+
+  files <- list.files(path = "C:/Users/DAFL/Desktop/worldclim", full.names = TRUE, pattern = "\\.tif$")
+  
+  rast <- raster(files[i])
+  
+  filename <- (paste(basename(files[i]), sep = ""))
+  
+  # crop the raster and update tt, 
+  rast <- setMinMax(rast)
+  projection(rast) <- '+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0'
+  
+  # if (i %in% c(1:2, 5:11)) rast <- rast / 10
+  
+  # Crop the raster
+  rast <- crop(rast, extent, snap = "out")
+  
+  
+  rast<- mask(rast, eurasia)
+  
+  # save raster
+  writeRaster(rast,
+              paste0('./Study Region/', filename, i), 
+              format='GTiff',
+              datatype='INT2S',
+              overwrite = TRUE)
+  
+  
+}
+
+#end cluster
+stopCluster(cl)
+
+# visually check
+predictors <- stack(
+  list.files(
+    'C:/Users/DAFL/Dropbox/vkm/Vespa velutina/Vespa velutina/Study Region/',
+    full.names=TRUE,
+    pattern='.tif'
+  )
+)
+
+
+```
+
+<br>
+
+##  Reshape and filter
+
+<br>
+
+```{r select,  warning = FALSE}
+
+# must have this structure 
+df <- df %>% dplyr::select(x=Longitude, y=Latitude, Species=Species)
+
+df <- df %>%  group_by(Species) %>%  filter(n() > 50)
+
+df<-as.data.frame(df)
+
+```
+
+
+<br>
+
+##  Run Maxnt model using with multicore. Untuned model with default settings! All 20 variables
+
+<br>
+
+```{r dopar,  warning = FALSE}
+
+setwd("C:/Users/DAFL/Dropbox/vkm/Vespa velutina/Vespa velutina/")
+
+# create list of unique species to loop over 
+sp_list <- unique(df$Species)
+
+numCores <- detectCores()
+numCores
+ # use multicore, set all
+registerDoParallel(numCores) 
+
+max <- foreach (i=seq_along(sp_list), .packages = c("dismo", "rJava")) %dopar% {
+  
+  data=subset(df, df$Species==sp_list[i])
+  
+  occ <- data[, -3]
+  
+  # witholding a 25% sample for testing
+  fold <- kfold(occ, k = 5)
+  occtest <- occ[fold == 1, ]
+  occtrain <- occ[fold != 1, ]
+  
+  me <- maxent(predictors, occtrain)
+  
+  # project into geographic space
+  r <- predict(me, predictors, args=c("outputformat=cloglog", "betamultiplier=1.5") )
+  
+}
+
+doParallel::stopImplicitCluster()
+
+```
+
+<br>
+
+##  Stack raster
+
+<br>
+
+```{r stack,  warning = FALSE}
+
+# stack all the outputs and name them
+stack.out <- stack(max)
+names(stack.out) <- sp_list
+#plot(stack.out)
+
+```
+
+<br>
+
+##  Plot MaxEnt result 
+## cloglog output =  a zero to one probability of presence for the species 
+
+<br>
+
+```{r plot_loop, fig.dim = c(10, 10), warning = FALSE}
+
+for (i in 1:nlayers(stack.out)) {
+  
+  p=subset(df, df$Species==sp_list[i])
+  
+  plot(stack.out[[i]], main=sp_list[i], col=rev(terrain.colors(10, alpha = 1)), breaks = seq(0, 1, by = 0.1)) 
+  
+  #points(p[,1:2], type = "p", pch=16, size=1)
+  
+}
+
+```
+
+
+```{r plot_gg, fig.dim = c(10, 10), warning = FALSE}
+
+library(viridis)
+
+mandarina_pts <- rasterToPoints(stack.out$vespa.mandarinia, spatial = TRUE)
+mandarina_df  <- data.frame(mandarina_pts)
+
+ggplot() +
+  geom_raster(data = mandarina_df , aes(x = x, y = y, fill = vespa.mandarinia  )) + 
+  scale_fill_gradientn(colours=plasma(7),  breaks=c(0, 0.5, 1), labels=c(0 ,0.5, 1), limits=c(0, 1)) +
+  coord_cartesian(xlim = c(0, 30), ylim = c(58, 71))  + 
+  labs(title = "vespa.mandarinia",
+       subtitle = "Current climate - Bioclim predictors")
+
+ggplot() +
+  geom_raster(data = mandarina_df , aes(x = x, y = y, fill = vespa.mandarinia  )) + 
+  scale_fill_gradientn(colours=plasma(7),  breaks=c(0, 0.5, 1), labels=c(0 ,0.5, 1), limits=c(0, 1)) +
+  coord_cartesian(xlim = c(-20, 50), ylim = c(30, 71))  + 
+  labs(title = "vespa.mandarinia",
+       subtitle = "Current climate - Bioclim predictors")
+
+
+ggplot() +
+  geom_raster(data = mandarina_df , aes(x = x, y = y, fill = vespa.mandarinia  )) + 
+  scale_fill_gradientn(colours=magma(3),  breaks=c(0, 0.5, 1), labels=c(0 ,0.5, 1), limits=c(0, 1)) + 
+  geom_point(data = filter(df, Species=="vespa mandarinia"), aes(x=x, y=y), col="red") +
+  coord_cartesian(xlim = c(-20, 50), ylim = c(30, 71))  + 
+  labs(title = "vespa.mandarinia",
+       subtitle = "Current climate - Bioclim predictors")
+
+
+#####
+
+vespa.velutina_pts <- rasterToPoints(stack.out$vespa.velutina, spatial = TRUE)
+vespa.velutina_df  <- data.frame(vespa.velutina_pts)
+
+ggplot() +
+  geom_raster(data = vespa.velutina_df , aes(x = x, y = y, fill = vespa.velutina  )) + 
+  scale_fill_gradientn(colours=plasma(7),  breaks=c(0, 0.5, 1), labels=c(0 ,0.5, 1), limits=c(0, 1)) +
+  coord_cartesian(xlim = c(0, 30), ylim = c(58, 71))  + 
+  labs(title = "vespa.velutina",
+       subtitle = "Current climate - Bioclim predictors")
+
+ggplot() +
+  geom_raster(data = vespa.velutina_df , aes(x = x, y = y, fill = vespa.velutina   )) + 
+  scale_fill_gradientn(colours=plasma(7),  breaks=c(0, 0.5, 1), labels=c(0 ,0.5, 1), limits=c(0, 1)) +
+  coord_cartesian(xlim = c(-20, 50), ylim = c(30, 71))  + 
+  labs(title = "vespa.velutina",
+       subtitle = "Current climate - Bioclim predictors")
+
+
+
+ggplot() +
+  geom_raster(data = vespa.velutina_df , aes(x = x, y = y, fill = vespa.velutina   )) + 
+  scale_fill_gradientn(colours=magma(3),  breaks=c(0, 0.5, 1), labels=c(0 ,0.5, 1), limits=c(0, 1)) +
+    geom_point(data = filter(df, Species=="vespa velutina"), aes(x=x, y=y), col="red") +
+  coord_cartesian(xlim = c(-20, 50), ylim = c(30, 71))  + 
+  labs(title = "vespa.velutina",
+       subtitle = "Current climate - Bioclim predictors & presence points")
+
+
+
+```
