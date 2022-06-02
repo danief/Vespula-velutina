@@ -31,9 +31,9 @@ splist<-Species$matched_name
 # split list for plotting 
 
 # fill in your gbif.org credentials 
-user <- "danief"  
-pwd <- "ZXasqw12" 
-email <- "floedaniel@gmail.com" 
+user <- ""  
+pwd <- "" 
+email <- "" 
 
 # use only eccpeted names 
 test<- splist %>% 
@@ -59,7 +59,7 @@ georef <- subset(dd, (is.na(decimalLongitude) | is.na(decimalLatitude)) & ! is.n
 georef
 
 library(ggmap)
-ggmap::register_google(key = "AIzaSyA46QZE1JSsQy_r26YnXbJS5py2rFAT9v0")
+ggmap::register_google(key = "")
 
 geolatlong<-geocode(georef$locality)
 
